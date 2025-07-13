@@ -9,8 +9,8 @@ from threading import Thread
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # Telegram configuration
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+TELEGRAM_TOKEN = "7976237011:AAHmAfze2QIMKqex5rLDJFhNVarblcQu8f4"
+TELEGRAM_CHAT_ID = "5452580709"
 
 # Interval in seconds
 INTERVAL = 300  # 5 minutes
