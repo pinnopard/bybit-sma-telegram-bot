@@ -1,36 +1,49 @@
 import requests
 import time
 import pandas as pd
+from flask import Flask
+import threading
+import os
 
-# --- Telegram config ---
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+# Telegram bot info — replace with your actual token and chat ID
+TELEGRAM_BOT_TOKEN = "7976237011:AAHmAfze2QIMKqex5rLDJFhNVarblcQu8f4"
+TELEGRAM_CHAT_ID = "5452580709"
 
-# --- Pairs to monitor ---
+# List of top 50 crypto pairs on Bybit (adjusted to valid symbols)
 PAIRS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
     "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT",
     "XLMUSDT", "LTCUSDT", "BCHUSDT", "TONUSDT", "UNIUSDT",
     "OPUSDT", "APTUSDT", "ARBUSDT", "NEARUSDT", "ATOMUSDT",
-    "FTMUSDT", "ALGOUSDT", "CROUSDT", "VETUSDT", "ICPUSDT",
-    "EGLDUSDT", "FILUSDT", "GRTUSDT", "SANDUSDT", "THETAUSDT",
-    "MANAUSDT", "CAKEUSDT", "AAVEUSDT", "1INCHUSDT", "AXSUSDT",
-    "ZILUSDT", "KSMUSDT", "MKRUSDT", "LRCUSDT", "ENJUSDT",
-    "CHZUSDT", "BATUSDT", "CELRUSDT", "CRVUSDT", "DASHUSDT",
-    "DGBUSDT", "DOGEUSDT", "EOSUSDT", "ETCUSDT", "GALAUSDT"
+    "EOSUSDT", "FTMUSDT", "ALGOUSDT", "VETUSDT", "TRXUSDT",
+    "THETAUSDT", "XMRUSDT", "ZECUSDT", "CHZUSDT", "GRTUSDT",
+    "CAKEUSDT", "SANDUSDT", "MANAUSDT", "KSMUSDT", "CRVUSDT",
+    "LDOUSDT", "1INCHUSDT", "QNTUSDT", "GLMRUSDT", "AXSUSDT",
+    "RUNEUSDT", "EGLDUSDT", "DASHUSDT", "ZILUSDT", "HNTUSDT",
+    "BTTUSDT", "STXUSDT", "XEMUSDT", "ZRXUSDT", "KAVAUSDT"
 ]
 
-BYBIT_API_URL = "https://api.bybit.com/public/linear/kline"
+# Bybit API endpoint for kline data
+BYBIT_KLINE_URL = "https://api.bybit.com/public/linear/kline"
 
-# --- Helper: send Telegram message ---
-def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    resp = requests.post(url, data=payload)
-    if not resp.ok:
-        print(f"Telegram error: {resp.text}")
+# Telegram API URL
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-# --- Helper: fetch kline data for a pair ---
+# Flask app for Render
+app = Flask(__name__)
+
+def send_telegram_message(message):
+    try:
+        resp = requests.post(TELEGRAM_API_URL, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown"
+        })
+        if not resp.ok:
+            print(f"Telegram error: {resp.json()}")
+    except Exception as e:
+        print(f"Error sending telegram message: {e}")
+
 def fetch_candles(symbol, interval="60", limit=100):
     params = {
         "symbol": symbol,
@@ -38,90 +51,95 @@ def fetch_candles(symbol, interval="60", limit=100):
         "limit": limit
     }
     try:
-        response = requests.get(BYBIT_API_URL, params=params, timeout=10)
+        response = requests.get(BYBIT_KLINE_URL, params=params)
         data = response.json()
-        if data.get("retCode") != 0:
-            print(f"❌ Bybit API error for {symbol}: {data.get('retMsg')}")
+        if data["retCode"] != 0 or "result" not in data or not data["result"]:
+            print(f"❌ Invalid data structure for {symbol}: {data}")
             return None
-        result = data.get("result")
-        if not result:
-            print(f"❌ No data for {symbol}")
-            return None
-        return result
+        return data["result"]
     except Exception as e:
-        print(f"❌ Exception fetching {symbol}: {e}")
+        print(f"Error fetching data for {symbol}: {e}")
         return None
 
-# --- Calculate SMAs and check strategy ---
+def calculate_sma(df, period):
+    return df['close'].rolling(window=period).mean()
+
 def check_strategy(df):
-    # Calculate SMAs
-    df['close'] = df['close'].astype(float)
-    df['sma7'] = df['close'].rolling(window=7).mean()
-    df['sma20'] = df['close'].rolling(window=20).mean()
-    df['sma60'] = df['close'].rolling(window=60).mean()
+    # We want to see if sma7 crossed sma20 upwards or downwards, and both sma7 & sma20 above or below sma60
+    # We'll check the last two candles to detect cross
 
-    # Use only closed candles (exclude last candle)
-    df = df.iloc[:-1]
+    sma7 = calculate_sma(df, 7)
+    sma20 = calculate_sma(df, 20)
+    sma60 = calculate_sma(df, 60)
 
-    if len(df) < 61:  # Ensure enough data for SMA60
+    # We need at least 61 candles to calculate sma60 for last point
+    if len(df) < 61 or sma7.isnull().any() or sma20.isnull().any() or sma60.isnull().any():
         return None
 
-    # Get last two rows to detect cross
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    # Last two indices
+    i = -1
+    i_prev = -2
 
-    # Detect upward cross sma7 crosses above sma20
-    cross_up = (prev['sma7'] < prev['sma20']) and (last['sma7'] > last['sma20'])
+    # Cross upward: sma7 crosses above sma20
+    cross_up = (sma7[i_prev] < sma20[i_prev]) and (sma7[i] > sma20[i])
+    # Cross downward: sma7 crosses below sma20
+    cross_down = (sma7[i_prev] > sma20[i_prev]) and (sma7[i] < sma20[i])
 
-    # Detect downward cross sma7 crosses below sma20
-    cross_down = (prev['sma7'] > prev['sma20']) and (last['sma7'] < last['sma20'])
+    # Both sma7 and sma20 above sma60 at last candle
+    above_sma60 = (sma7[i] > sma60[i]) and (sma20[i] > sma60[i])
+    # Both sma7 and sma20 below sma60 at last candle
+    below_sma60 = (sma7[i] < sma60[i]) and (sma20[i] < sma60[i])
 
-    if cross_up and (last['sma7'] > last['sma60']) and (last['sma20'] > last['sma60']):
+    if cross_up and above_sma60:
         return "BUY"
-
-    if cross_down and (last['sma7'] < last['sma60']) and (last['sma20'] < last['sma60']):
+    elif cross_down and below_sma60:
         return "SELL"
+    else:
+        return None
 
-    return None
-
-def main():
-    print("SMA bot started. Checking pairs every 15 minutes...")
-
-    # Send a test message on start
-    send_telegram_message("✅ SMA bot started and running.")
-
+def run_bot():
+    send_telegram_message("🚀 *SMA Bot deployed and running!* Checking top 50 crypto pairs on 1-hour timeframe every 5 mins.")
     while True:
-        try:
-            for pair in PAIRS:
-                print(f"🔍 Checking {pair}")
-                candles = fetch_candles(pair)
-                if not candles:
-                    print(f"❌ Failed to fetch data for {pair}")
-                    continue
+        for symbol in PAIRS:
+            print(f"🔍 Checking {symbol}")
+            candles = fetch_candles(symbol)
+            if candles is None:
+                print(f"❌ Failed to fetch data for {symbol}")
+                continue
 
-                # Prepare DataFrame
-                df = pd.DataFrame(candles)
-                signal = check_strategy(df)
+            # Create DataFrame
+            df = pd.DataFrame(candles)
+            # Convert prices to float
+            df['close'] = df['close'].astype(float)
 
-                if signal:
-                    msg = (
-                        f"⚡️ {signal} signal detected for {pair}\n"
-                        f"Timeframe: 1h\n"
-                        f"SMA7 crossed SMA20 {'upward' if signal=='BUY' else 'downward'}, "
-                        f"both above/below SMA60.\n"
-                        f"Last close price: {df.iloc[-2]['close']}"
-                    )
-                    send_telegram_message(msg)
-                    print(f"📨 Sent {signal} alert for {pair}")
-                else:
-                    print(f"No signal on {pair}")
+            signal = check_strategy(df)
+            if signal:
+                latest_close = df['close'].iloc[-1]
+                message = (
+                    f"📊 *{symbol}*\n"
+                    f"SMA7 crossed SMA20 *{signal}*\n"
+                    f"Both SMA7 & SMA20 {'above' if signal == 'BUY' else 'below'} SMA60\n"
+                    f"Latest Close Price: {latest_close}\n"
+                    f"Timeframe: 1-hour candles\n"
+                    f"Checked every 5 minutes\n"
+                    f"---\n"
+                    f"Stay tuned for next signals!"
+                )
+                send_telegram_message(message)
+                print(f"⚡ Signal on {symbol}: {signal}")
+            else:
+                print(f"No signal on {symbol}")
 
-            print("✅ Cycle complete. Sleeping for 15 minutes.")
-            time.sleep(900)
+        print("✅ Cycle complete. Sleeping for 300 seconds.")
+        time.sleep(300)  # 5 minutes
 
-        except Exception as e:
-            print(f"❌ Exception in main loop: {e}")
-            time.sleep(60)
+@app.route("/")
+def home():
+    return "SMA Bot is running!"
 
 if __name__ == "__main__":
-    main()
+    # Run the bot in a separate thread so Flask app can run concurrently
+    threading.Thread(target=run_bot, daemon=True).start()
+    # Bind to the port Render sets, default to 8080 if not set
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
