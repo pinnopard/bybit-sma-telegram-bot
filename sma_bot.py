@@ -24,15 +24,20 @@ CHECK_INTERVAL = 300  # 5 minutes
 
 def get_klines(symbol):
     url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={INTERVAL}&limit={LIMIT}"
-    resp = requests.get(url)
-    data = resp.json()
-    if "result" not in data or "list" not in data["result"]:
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if "result" not in data or "list" not in data["result"]:
+            print(f"❌ Invalid data structure for {symbol}: {data}")
+            return None
+        df = pd.DataFrame(data["result"]["list"], columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
+        ])
+        df['close'] = pd.to_numeric(df['close'])
+        return df
+    except Exception as e:
+        print(f"❌ Exception fetching klines for {symbol}: {e}")
         return None
-    df = pd.DataFrame(data["result"]["list"], columns=[
-        'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-    ])
-    df['close'] = pd.to_numeric(df['close'])
-    return df
 
 def check_signal(df):
     df['sma1'] = df['close'].rolling(window=7).mean()
@@ -72,26 +77,40 @@ def send_telegram_message(text):
         "text": text
     }
     try:
-        requests.post(url, json=payload)
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"❌ Telegram API error: {resp.text}")
     except Exception as e:
-        print("Failed to send Telegram message:", e)
+        print(f"❌ Failed to send Telegram message: {e}")
 
 def run_bot():
     print("SMA bot started.")
+    # Send a test message on startup
+    send_telegram_message("✅ SMA Bot is now live on Render and monitoring symbols.")
+
     while True:
         for symbol in SYMBOLS:
-            print(f"Checking {symbol}")
-            df = get_klines(symbol)
-            if df is None:
-                continue
-            signal = check_signal(df)
-            if signal:
-                msg = f"{signal} signal on {symbol} (1H timeframe)"
-                send_telegram_message(msg)
-                print(msg)
+            try:
+                print(f"Checking {symbol}")
+                df = get_klines(symbol)
+                if df is None:
+                    print(f"❌ Failed to fetch data for {symbol}")
+                    continue
+
+                signal = check_signal(df)
+                if signal:
+                    msg = f"{signal} signal on {symbol} (1H timeframe)"
+                    send_telegram_message(msg)
+                    print(f"📩 Sent: {msg}")
+                else:
+                    print(f"No signal on {symbol}")
+
+            except Exception as e:
+                print(f"⚠️ Error with {symbol}: {e}")
+
+        print(f"✅ Cycle complete. Sleeping for {CHECK_INTERVAL} seconds.\n")
         time.sleep(CHECK_INTERVAL)
 
-# Run bot in background thread
 def start_bot_thread():
     thread = threading.Thread(target=run_bot)
     thread.daemon = True
@@ -101,4 +120,3 @@ if __name__ == "__main__":
     start_bot_thread()
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-
