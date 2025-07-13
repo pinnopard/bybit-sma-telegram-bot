@@ -12,13 +12,13 @@ app = Flask(__name__)
 def index():
     return "SMA Bot is running"
 
-# Parameters
+# Symbols list - top 20 crypto and top 10 forex + XAUUSD
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT',
     'XLMUSDT', 'LTCUSDT', 'BCHUSDT', 'TONUSDT', 'UNIUSDT', 'OPUSDT', 'APTUSDT', 'ARBUSDT', 'NEARUSDT', 'ATOMUSDT',
     'XAUUSD', 'USDJPY', 'EURUSD', 'GBPUSD', 'AUDUSD', 'USDCAD', 'USDCHF', 'NZDUSD', 'EURJPY', 'GBPJPY'
 ]
-INTERVAL = '60'  # 1 hour
+INTERVAL = '60'  # 1 hour candles
 LIMIT = 100
 CHECK_INTERVAL = 300  # 5 minutes
 
@@ -28,7 +28,7 @@ def get_klines(symbol):
         resp = requests.get(url, timeout=10)
         data = resp.json()
         if "result" not in data or "list" not in data["result"]:
-            print(f"❌ Invalid data structure for {symbol}: {data}")
+            print(f"❌ Invalid data structure for {symbol}: {data}", flush=True)
             return None
         df = pd.DataFrame(data["result"]["list"], columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
@@ -36,7 +36,7 @@ def get_klines(symbol):
         df['close'] = pd.to_numeric(df['close'])
         return df
     except Exception as e:
-        print(f"❌ Exception fetching klines for {symbol}: {e}")
+        print(f"❌ Exception fetching klines for {symbol}: {e}", flush=True)
         return None
 
 def check_signal(df):
@@ -50,7 +50,7 @@ def check_signal(df):
     prev = df.iloc[-2]
     last = df.iloc[-1]
 
-    # Buy Signal
+    # Buy signal
     if (
         prev['sma1'] < prev['sma2'] and
         last['sma1'] > last['sma2'] and
@@ -59,7 +59,7 @@ def check_signal(df):
     ):
         return "BUY"
 
-    # Sell Signal
+    # Sell signal
     if (
         prev['sma1'] > prev['sma2'] and
         last['sma1'] < last['sma2'] and
@@ -79,36 +79,36 @@ def send_telegram_message(text):
     try:
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code != 200:
-            print(f"❌ Telegram API error: {resp.text}")
+            print(f"❌ Telegram API error: {resp.text}", flush=True)
     except Exception as e:
-        print(f"❌ Failed to send Telegram message: {e}")
+        print(f"❌ Failed to send Telegram message: {e}", flush=True)
 
 def run_bot():
-    print("SMA bot started.")
-    # Send a test message on startup
+    print("SMA bot started running in thread.", flush=True)
+    # Startup test message
     send_telegram_message("✅ SMA Bot is now live on Render and monitoring symbols.")
 
     while True:
         for symbol in SYMBOLS:
             try:
-                print(f"Checking {symbol}")
+                print(f"Checking {symbol}", flush=True)
                 df = get_klines(symbol)
                 if df is None:
-                    print(f"❌ Failed to fetch data for {symbol}")
+                    print(f"Failed to fetch data for {symbol}", flush=True)
                     continue
 
                 signal = check_signal(df)
                 if signal:
                     msg = f"{signal} signal on {symbol} (1H timeframe)"
                     send_telegram_message(msg)
-                    print(f"📩 Sent: {msg}")
+                    print(f"Sent alert: {msg}", flush=True)
                 else:
-                    print(f"No signal on {symbol}")
+                    print(f"No signal on {symbol}", flush=True)
 
             except Exception as e:
-                print(f"⚠️ Error with {symbol}: {e}")
+                print(f"⚠️ Error with {symbol}: {e}", flush=True)
 
-        print(f"✅ Cycle complete. Sleeping for {CHECK_INTERVAL} seconds.\n")
+        print(f"Cycle complete. Sleeping {CHECK_INTERVAL}s\n", flush=True)
         time.sleep(CHECK_INTERVAL)
 
 def start_bot_thread():
