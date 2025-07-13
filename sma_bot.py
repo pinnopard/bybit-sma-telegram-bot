@@ -1,98 +1,104 @@
-import requests
-import pandas as pd
+import os
 import time
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, SYMBOLS, INTERVAL, CHECK_INTERVAL_SECONDS
+import requests
+import threading
+from flask import Flask
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+import pandas as pd
 
-BASE_URL = "https://api.bybit.com"
+app = Flask(__name__)
 
-def get_klines(symbol, interval=INTERVAL, limit=100):
-    endpoint = "/v5/market/kline"
-    params = {
-        "category": "linear",
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
-    }
-    response = requests.get(BASE_URL + endpoint, params=params)
-    data = response.json()
-    if data["retCode"] != 0:
-        raise Exception(f"API error: {data['retMsg']}")
+@app.route("/")
+def index():
+    return "SMA Bot is running"
+
+# Parameters
+SYMBOLS = [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT',
+    'XLMUSDT', 'LTCUSDT', 'BCHUSDT', 'TONUSDT', 'UNIUSDT', 'OPUSDT', 'APTUSDT', 'ARBUSDT', 'NEARUSDT', 'ATOMUSDT',
+    'XAUUSD', 'USDJPY', 'EURUSD', 'GBPUSD', 'AUDUSD', 'USDCAD', 'USDCHF', 'NZDUSD', 'EURJPY', 'GBPJPY'
+]
+INTERVAL = '60'  # 1 hour
+LIMIT = 100
+CHECK_INTERVAL = 300  # 5 minutes
+
+def get_klines(symbol):
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={INTERVAL}&limit={LIMIT}"
+    resp = requests.get(url)
+    data = resp.json()
+    if "result" not in data or "list" not in data["result"]:
+        return None
     df = pd.DataFrame(data["result"]["list"], columns=[
-        "timestamp", "open", "high", "low", "close", "volume", "turnover"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
-    df = df.astype({"close": float})
-    return df[["timestamp", "close"]]
-
-def apply_triple_sma_strategy(df, sma1=7, sma2=20, sma3=60):
-    df["SMA1"] = df["close"].rolling(sma1).mean()
-    df["SMA2"] = df["close"].rolling(sma2).mean()
-    df["SMA3"] = df["close"].rolling(sma3).mean()
-    df["Signal"] = "HOLD"
-    for i in range(1, len(df)):
-        prev_sma1 = df.loc[i-1, "SMA1"]
-        prev_sma2 = df.loc[i-1, "SMA2"]
-        curr_sma1 = df.loc[i, "SMA1"]
-        curr_sma2 = df.loc[i, "SMA2"]
-        curr_sma3 = df.loc[i, "SMA3"]
-
-        if (
-            pd.notna(prev_sma1) and pd.notna(prev_sma2) and pd.notna(curr_sma1) and pd.notna(curr_sma2) and pd.notna(curr_sma3)
-        ):
-            # BUY condition
-            if (
-                prev_sma1 < prev_sma2 and
-                curr_sma1 > curr_sma2 and
-                curr_sma1 > curr_sma3 and
-                curr_sma2 > curr_sma3
-            ):
-                df.loc[i, "Signal"] = "BUY"
-            # SELL condition
-            elif (
-                prev_sma1 > prev_sma2 and
-                curr_sma1 < curr_sma2 and
-                curr_sma1 < curr_sma3 and
-                curr_sma2 < curr_sma3
-            ):
-                df.loc[i, "Signal"] = "SELL"
+        'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
+    ])
+    df['close'] = pd.to_numeric(df['close'])
     return df
 
-def send_telegram_alert(symbol, message: str):
+def check_signal(df):
+    df['sma1'] = df['close'].rolling(window=7).mean()
+    df['sma2'] = df['close'].rolling(window=20).mean()
+    df['sma3'] = df['close'].rolling(window=60).mean()
+
+    if len(df) < 61:
+        return None
+
+    prev = df.iloc[-2]
+    last = df.iloc[-1]
+
+    # Buy Signal
+    if (
+        prev['sma1'] < prev['sma2'] and
+        last['sma1'] > last['sma2'] and
+        last['sma1'] > last['sma3'] and
+        last['sma2'] > last['sma3']
+    ):
+        return "BUY"
+
+    # Sell Signal
+    if (
+        prev['sma1'] > prev['sma2'] and
+        last['sma1'] < last['sma2'] and
+        last['sma1'] < last['sma3'] and
+        last['sma2'] < last['sma3']
+    ):
+        return "SELL"
+
+    return None
+
+def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"{symbol}: {message}"
+        "text": text
     }
-    response = requests.post(url, json=payload)
-    if not response.ok:
-        print("Telegram alert failed:", response.text)
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print("Failed to send Telegram message:", e)
 
-def monitor(last_signal_times=None):
-    if last_signal_times is None:
-        last_signal_times = {symbol: None for symbol in SYMBOLS}
-
-    for symbol in SYMBOLS:
-        try:
+def run_bot():
+    print("SMA bot started.")
+    while True:
+        for symbol in SYMBOLS:
+            print(f"Checking {symbol}")
             df = get_klines(symbol)
-            df = apply_triple_sma_strategy(df)
-            latest = df.iloc[-1]
+            if df is None:
+                continue
+            signal = check_signal(df)
+            if signal:
+                msg = f"{signal} signal on {symbol} (1H timeframe)"
+                send_telegram_message(msg)
+                print(msg)
+        time.sleep(CHECK_INTERVAL)
 
-            if latest["Signal"] in ["BUY", "SELL"]:
-                candle_time = latest["timestamp"]
-                if last_signal_times[symbol] is None or candle_time > last_signal_times[symbol]:
-                    message = (
-                        f"🚨 {latest['Signal']} SIGNAL 🚨\n"
-                        f"Price: {latest['close']:.2f}\n"
-                        f"Time: {candle_time}"
-                    )
-                    send_telegram_alert(symbol, message)
-                    last_signal_times[symbol] = candle_time
-        except Exception as e:
-            print(f"Error processing {symbol}: {e}")
-
-    return last_signal_times
+# Run bot in background thread
+def start_bot_thread():
+    thread = threading.Thread(target=run_bot)
+    thread.daemon = True
+    thread.start()
 
 if __name__ == "__main__":
-    last_signal_times = None
-    while True:
-        last_signal_times = monitor(last_signal_times)
-        time.sleep(CHECK_INTERVAL_SECONDS)
+    start_bot_thread()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
