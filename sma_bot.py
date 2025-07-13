@@ -1,112 +1,127 @@
 import requests
 import time
 import pandas as pd
-import logging
-from flask import Flask
-from threading import Thread
 
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+# --- Telegram config ---
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
 
-# Telegram configuration
-TELEGRAM_TOKEN = "7976237011:AAHmAfze2QIMKqex5rLDJFhNVarblcQu8f4"
-TELEGRAM_CHAT_ID = "5452580709"
-
-# Interval in seconds
-INTERVAL = 300  # 5 minutes
-
-# Top 50 valid crypto pairs on Bybit
-SYMBOLS = [
+# --- Pairs to monitor ---
+PAIRS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
     "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT",
     "XLMUSDT", "LTCUSDT", "BCHUSDT", "TONUSDT", "UNIUSDT",
     "OPUSDT", "APTUSDT", "ARBUSDT", "NEARUSDT", "ATOMUSDT",
-    "PEPEUSDT", "INJUSDT", "FILUSDT", "SUIUSDT", "RNDRUSDT",
-    "IMXUSDT", "GRTUSDT", "FTMUSDT", "AAVEUSDT", "ETCUSDT",
-    "STXUSDT", "CHZUSDT", "CRVUSDT", "EGLDUSDT", "MKRUSDT",
-    "DYDXUSDT", "FLOWUSDT", "SNXUSDT", "MINAUSDT", "GMXUSDT",
-    "RUNEUSDT", "KLAYUSDT", "BATUSDT", "ZILUSDT", "SKLUSDT",
-    "CELOUSDT", "ENJUSDT", "1INCHUSDT", "TWTUSDT", "ICXUSDT"
+    "FTMUSDT", "ALGOUSDT", "CROUSDT", "VETUSDT", "ICPUSDT",
+    "EGLDUSDT", "FILUSDT", "GRTUSDT", "SANDUSDT", "THETAUSDT",
+    "MANAUSDT", "CAKEUSDT", "AAVEUSDT", "1INCHUSDT", "AXSUSDT",
+    "ZILUSDT", "KSMUSDT", "MKRUSDT", "LRCUSDT", "ENJUSDT",
+    "CHZUSDT", "BATUSDT", "CELRUSDT", "CRVUSDT", "DASHUSDT",
+    "DGBUSDT", "DOGEUSDT", "EOSUSDT", "ETCUSDT", "GALAUSDT"
 ]
 
-# SMA settings
-SMA_PERIOD = 20
-TIMEFRAME = "5"  # 5-minute candles
+BYBIT_API_URL = "https://api.bybit.com/public/linear/kline"
 
-app = Flask(__name__)
+# --- Helper: send Telegram message ---
+def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    resp = requests.post(url, data=payload)
+    if not resp.ok:
+        print(f"Telegram error: {resp.text}")
 
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+# --- Helper: fetch kline data for a pair ---
+def fetch_candles(symbol, interval="60", limit=100):
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
+    }
     try:
-        response = requests.post(url, json=payload)
-        if response.status_code != 200:
-            logging.error(f"Telegram error: {response.text}")
+        response = requests.get(BYBIT_API_URL, params=params, timeout=10)
+        data = response.json()
+        if data.get("retCode") != 0:
+            print(f"❌ Bybit API error for {symbol}: {data.get('retMsg')}")
+            return None
+        result = data.get("result")
+        if not result:
+            print(f"❌ No data for {symbol}")
+            return None
+        return result
     except Exception as e:
-        logging.error(f"Telegram send failed: {e}")
-
-def fetch_candles(symbol):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={TIMEFRAME}&limit=100"
-    response = requests.get(url)
-    data = response.json()
-
-    if data["retCode"] != 0 or "result" not in data:
-        logging.warning(f"❌ Invalid data structure for {symbol}: {data}")
+        print(f"❌ Exception fetching {symbol}: {e}")
         return None
 
-    try:
-        df = pd.DataFrame(data["result"]["list"], columns=[
-            "timestamp", "open", "high", "low", "close", "volume", "turnover"])
-        df["close"] = pd.to_numeric(df["close"])
-        return df
-    except Exception as e:
-        logging.warning(f"❌ Failed to parse candles for {symbol}: {e}")
+# --- Calculate SMAs and check strategy ---
+def check_strategy(df):
+    # Calculate SMAs
+    df['close'] = df['close'].astype(float)
+    df['sma7'] = df['close'].rolling(window=7).mean()
+    df['sma20'] = df['close'].rolling(window=20).mean()
+    df['sma60'] = df['close'].rolling(window=60).mean()
+
+    # Use only closed candles (exclude last candle)
+    df = df.iloc[:-1]
+
+    if len(df) < 61:  # Ensure enough data for SMA60
         return None
 
-def check_signals():
-    for symbol in SYMBOLS:
-        logging.info(f"🔍 Checking {symbol}")
-        df = fetch_candles(symbol)
-        if df is None or df.empty:
-            logging.warning(f"❌ Failed to fetch data for {symbol}")
-            continue
+    # Get last two rows to detect cross
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-        df["sma"] = df["close"].rolling(SMA_PERIOD).mean()
+    # Detect upward cross sma7 crosses above sma20
+    cross_up = (prev['sma7'] < prev['sma20']) and (last['sma7'] > last['sma20'])
 
-        latest_close = df["close"].iloc[-1]
-        latest_sma = df["sma"].iloc[-1]
+    # Detect downward cross sma7 crosses below sma20
+    cross_down = (prev['sma7'] > prev['sma20']) and (last['sma7'] < last['sma20'])
 
-        if pd.isna(latest_sma):
-            logging.info(f"⚠️ Not enough data to compute SMA for {symbol}")
-            continue
+    if cross_up and (last['sma7'] > last['sma60']) and (last['sma20'] > last['sma60']):
+        return "BUY"
 
-        if latest_close > latest_sma:
-            message = f"📈 {symbol}: Price crossed **above** SMA{SMA_PERIOD}"
-            send_telegram_message(message)
-        elif latest_close < latest_sma:
-            message = f"📉 {symbol}: Price crossed **below** SMA{SMA_PERIOD}"
-            send_telegram_message(message)
-        else:
-            logging.info(f"No signal on {symbol}")
+    if cross_down and (last['sma7'] < last['sma60']) and (last['sma20'] < last['sma60']):
+        return "SELL"
 
-    logging.info("✅ Cycle complete. Sleeping for 300 seconds.")
+    return None
 
-def run_bot():
-    logging.info("SMA bot started.")
-    send_telegram_message("✅ SMA Bot deployed and started. Monitoring 50 pairs...")
+def main():
+    print("SMA bot started. Checking pairs every 15 minutes...")
+
+    # Send a test message on start
+    send_telegram_message("✅ SMA bot started and running.")
+
     while True:
-        check_signals()
-        time.sleep(INTERVAL)
+        try:
+            for pair in PAIRS:
+                print(f"🔍 Checking {pair}")
+                candles = fetch_candles(pair)
+                if not candles:
+                    print(f"❌ Failed to fetch data for {pair}")
+                    continue
 
-@app.route("/", methods=["GET", "HEAD"])
-def home():
-    return "SMA bot running"
+                # Prepare DataFrame
+                df = pd.DataFrame(candles)
+                signal = check_strategy(df)
 
-def start_bot():
-    bot_thread = Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
+                if signal:
+                    msg = (
+                        f"⚡️ {signal} signal detected for {pair}\n"
+                        f"Timeframe: 1h\n"
+                        f"SMA7 crossed SMA20 {'upward' if signal=='BUY' else 'downward'}, "
+                        f"both above/below SMA60.\n"
+                        f"Last close price: {df.iloc[-2]['close']}"
+                    )
+                    send_telegram_message(msg)
+                    print(f"📨 Sent {signal} alert for {pair}")
+                else:
+                    print(f"No signal on {pair}")
+
+            print("✅ Cycle complete. Sleeping for 15 minutes.")
+            time.sleep(900)
+
+        except Exception as e:
+            print(f"❌ Exception in main loop: {e}")
+            time.sleep(60)
 
 if __name__ == "__main__":
-    start_bot()
-    app.run(host="0.0.0.0", port=8080)
+    main()
