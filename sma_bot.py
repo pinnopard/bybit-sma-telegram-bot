@@ -1,122 +1,112 @@
-import os
-import time
 import requests
-import threading
-from flask import Flask
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+import time
 import pandas as pd
+import logging
+from flask import Flask
+from threading import Thread
+
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+# Telegram configuration
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+
+# Interval in seconds
+INTERVAL = 300  # 5 minutes
+
+# Top 50 valid crypto pairs on Bybit
+SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
+    "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT",
+    "XLMUSDT", "LTCUSDT", "BCHUSDT", "TONUSDT", "UNIUSDT",
+    "OPUSDT", "APTUSDT", "ARBUSDT", "NEARUSDT", "ATOMUSDT",
+    "PEPEUSDT", "INJUSDT", "FILUSDT", "SUIUSDT", "RNDRUSDT",
+    "IMXUSDT", "GRTUSDT", "FTMUSDT", "AAVEUSDT", "ETCUSDT",
+    "STXUSDT", "CHZUSDT", "CRVUSDT", "EGLDUSDT", "MKRUSDT",
+    "DYDXUSDT", "FLOWUSDT", "SNXUSDT", "MINAUSDT", "GMXUSDT",
+    "RUNEUSDT", "KLAYUSDT", "BATUSDT", "ZILUSDT", "SKLUSDT",
+    "CELOUSDT", "ENJUSDT", "1INCHUSDT", "TWTUSDT", "ICXUSDT"
+]
+
+# SMA settings
+SMA_PERIOD = 20
+TIMEFRAME = "5"  # 5-minute candles
 
 app = Flask(__name__)
 
-@app.route("/")
-def index():
-    return "SMA Bot is running"
-
-# Symbols list - top 20 crypto and top 10 forex + XAUUSD
-SYMBOLS = [
-    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT',
-    'XLMUSDT', 'LTCUSDT', 'BCHUSDT', 'TONUSDT', 'UNIUSDT', 'OPUSDT', 'APTUSDT', 'ARBUSDT', 'NEARUSDT', 'ATOMUSDT',
-    'XAUUSD', 'USDJPY', 'EURUSD', 'GBPUSD', 'AUDUSD', 'USDCAD', 'USDCHF', 'NZDUSD', 'EURJPY', 'GBPJPY'
-]
-INTERVAL = '60'  # 1 hour candles
-LIMIT = 100
-CHECK_INTERVAL = 300  # 5 minutes
-
-def get_klines(symbol):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={INTERVAL}&limit={LIMIT}"
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        if "result" not in data or "list" not in data["result"]:
-            print(f"❌ Invalid data structure for {symbol}: {data}", flush=True)
-            return None
+        response = requests.post(url, json=payload)
+        if response.status_code != 200:
+            logging.error(f"Telegram error: {response.text}")
+    except Exception as e:
+        logging.error(f"Telegram send failed: {e}")
+
+def fetch_candles(symbol):
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={TIMEFRAME}&limit=100"
+    response = requests.get(url)
+    data = response.json()
+
+    if data["retCode"] != 0 or "result" not in data:
+        logging.warning(f"❌ Invalid data structure for {symbol}: {data}")
+        return None
+
+    try:
         df = pd.DataFrame(data["result"]["list"], columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-        ])
-        df['close'] = pd.to_numeric(df['close'])
+            "timestamp", "open", "high", "low", "close", "volume", "turnover"])
+        df["close"] = pd.to_numeric(df["close"])
         return df
     except Exception as e:
-        print(f"❌ Exception fetching klines for {symbol}: {e}", flush=True)
+        logging.warning(f"❌ Failed to parse candles for {symbol}: {e}")
         return None
 
-def check_signal(df):
-    df['sma1'] = df['close'].rolling(window=7).mean()
-    df['sma2'] = df['close'].rolling(window=20).mean()
-    df['sma3'] = df['close'].rolling(window=60).mean()
+def check_signals():
+    for symbol in SYMBOLS:
+        logging.info(f"🔍 Checking {symbol}")
+        df = fetch_candles(symbol)
+        if df is None or df.empty:
+            logging.warning(f"❌ Failed to fetch data for {symbol}")
+            continue
 
-    if len(df) < 61:
-        return None
+        df["sma"] = df["close"].rolling(SMA_PERIOD).mean()
 
-    prev = df.iloc[-2]
-    last = df.iloc[-1]
+        latest_close = df["close"].iloc[-1]
+        latest_sma = df["sma"].iloc[-1]
 
-    # Buy signal
-    if (
-        prev['sma1'] < prev['sma2'] and
-        last['sma1'] > last['sma2'] and
-        last['sma1'] > last['sma3'] and
-        last['sma2'] > last['sma3']
-    ):
-        return "BUY"
+        if pd.isna(latest_sma):
+            logging.info(f"⚠️ Not enough data to compute SMA for {symbol}")
+            continue
 
-    # Sell signal
-    if (
-        prev['sma1'] > prev['sma2'] and
-        last['sma1'] < last['sma2'] and
-        last['sma1'] < last['sma3'] and
-        last['sma2'] < last['sma3']
-    ):
-        return "SELL"
+        if latest_close > latest_sma:
+            message = f"📈 {symbol}: Price crossed **above** SMA{SMA_PERIOD}"
+            send_telegram_message(message)
+        elif latest_close < latest_sma:
+            message = f"📉 {symbol}: Price crossed **below** SMA{SMA_PERIOD}"
+            send_telegram_message(message)
+        else:
+            logging.info(f"No signal on {symbol}")
 
-    return None
-
-def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text
-    }
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code != 200:
-            print(f"❌ Telegram API error: {resp.text}", flush=True)
-    except Exception as e:
-        print(f"❌ Failed to send Telegram message: {e}", flush=True)
+    logging.info("✅ Cycle complete. Sleeping for 300 seconds.")
 
 def run_bot():
-    print("SMA bot started running in thread.", flush=True)
-    # Startup test message
-    send_telegram_message("✅ SMA Bot is now live on Render and monitoring symbols.")
-
+    logging.info("SMA bot started.")
+    send_telegram_message("✅ SMA Bot deployed and started. Monitoring 50 pairs...")
     while True:
-        for symbol in SYMBOLS:
-            try:
-                print(f"Checking {symbol}", flush=True)
-                df = get_klines(symbol)
-                if df is None:
-                    print(f"Failed to fetch data for {symbol}", flush=True)
-                    continue
+        check_signals()
+        time.sleep(INTERVAL)
 
-                signal = check_signal(df)
-                if signal:
-                    msg = f"{signal} signal on {symbol} (1H timeframe)"
-                    send_telegram_message(msg)
-                    print(f"Sent alert: {msg}", flush=True)
-                else:
-                    print(f"No signal on {symbol}", flush=True)
+@app.route("/", methods=["GET", "HEAD"])
+def home():
+    return "SMA bot running"
 
-            except Exception as e:
-                print(f"⚠️ Error with {symbol}: {e}", flush=True)
-
-        print(f"Cycle complete. Sleeping {CHECK_INTERVAL}s\n", flush=True)
-        time.sleep(CHECK_INTERVAL)
-
-def start_bot_thread():
-    thread = threading.Thread(target=run_bot)
-    thread.daemon = True
-    thread.start()
+def start_bot():
+    bot_thread = Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
 
 if __name__ == "__main__":
-    start_bot_thread()
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    start_bot()
+    app.run(host="0.0.0.0", port=8080)
